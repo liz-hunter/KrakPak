@@ -6,7 +6,7 @@ Authors@R:
         "Liz",
         "Hunter",
         role = c("aut", "cre"),
-        email = "..."
+        email = "elizabeth.hunter@fda.hhs.gov"
     )
 Description:
     Tools for preparing genome assembly metadata, generating bootstrap
@@ -26,3 +26,4 @@ Imports:
 Suggests:
     testthat (>= 3.0.0)
 Config/testthat/edition: 3
+Config/roxygen2/version: 8.1.0

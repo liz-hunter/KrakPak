@@ -6,9 +6,7 @@
 # * https://r-pkgs.org/testing-design.html#sec-tests-files-overview
 # * https://testthat.r-lib.org/articles/special-files.html
 
-library(devtools)
 library(testthat)
 library(KrakPak)
 
-devtools::load_all()
 test_check("KrakPak")

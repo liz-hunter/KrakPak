@@ -24,6 +24,8 @@ inspect_wide(
 
 \item{taxid}{Column identifying taxa. Defaults to \code{"taxid"}.}
 
+\item{name}{The dataset name}
+
 \item{fill}{Value used when a taxon is absent from a replicate. Defaults
 to \code{0}. Use \code{NA} to retain absent combinations as missing.}
 }

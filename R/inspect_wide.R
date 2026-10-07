@@ -8,6 +8,7 @@
 #' matrices for downstream analyses.
 #'
 #' @param data A tibble returned by `read_inspect()`.
+#' @param name The dataset name
 #' @param value Numeric column to place in the replicate columns. Defaults to
 #'   `"incl_min_count"`. Common alternatives include `"perc_comp_exact"` and
 #'   `"excl_min_count"`.
