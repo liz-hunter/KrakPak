@@ -1,17 +1,28 @@
 Package: KrakPak
-Title: What the Package Does (One Line, Title Case)
-Version: 0.0.0.9000
-Authors@R: 
-    person("First", "Last", , "first.last@example.com", role = c("aut", "cre"))
-Description: What the package does (one paragraph).
-License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
-    license
+Title: Tools for Building and Evaluating Kraken Databases
+Version: 1.00
+Authors@R:
+    person(
+        "Liz",
+        "Hunter",
+        role = c("aut", "cre"),
+        email = "..."
+    )
+Description:
+    Tools for preparing genome assembly metadata, generating bootstrap
+    Kraken databases, reading Kraken inspection reports, and evaluating
+    taxonomic database composition and performance.
+License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-Suggests: 
+Imports:
+    dplyr,
+    ggplot2,
+    janitor,
+    readr,
+    stringr,
+    tibble,
+    tidyr
+Suggests:
     testthat (>= 3.0.0)
 Config/testthat/edition: 3
-Imports: 
-    dplyr,
-    readr
-Config/roxygen2/version: 8.1.0
