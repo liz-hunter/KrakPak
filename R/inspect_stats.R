@@ -1,12 +1,28 @@
 #' Calculate variability statistics across Kraken inspect replicates
 #'
-#' Calculates summary and variability statistics for taxa across replicate
-#' Kraken database inspect reports. Useful for identifying taxa that are
-#' consistently represented across databases versus taxa whose representation
-#' is highly variable.
+#' Summarizes taxon representation across replicate Kraken database inspect
+#' reports and calculates measures of replicate variability.
+#'
+#' Inferential relative variance (InfRV) is calculated following Zhu et al.
+#' (2019), using a count-valued column:
+#'
+#' \deqn{
+#'   InfRV = \frac{\max(s^2 - \mu, 0)}{\mu + pseudocount} + 0.01
+#' }
+#'
+#' where \eqn{s^2} is the sample variance and \eqn{\mu} is the mean across
+#' replicate databases. The original publication used a pseudocount of 5.
+#'
+#' Taxa absent from individual replicate reports are treated as zero by
+#' default.
 #'
 #' @param data A tibble returned by `read_inspect()`.
-#' @param value Numeric column to summarize. Defaults to `"perc_comp_exact"`.
+#' @param value Numeric column used for the standard summary statistics.
+#'   Defaults to `"perc_comp_exact"`.
+#' @param infrv_value Count-valued column used to calculate inferential
+#'   relative variance. Defaults to `"incl_min_count"`.
+#' @param pseudocount Non-negative numeric pseudocount added to the InfRV
+#'   denominator. Defaults to 5, as used by Zhu et al. (2019).
 #' @param replicate Column identifying replicate databases. Defaults to `"db"`.
 #' @param taxon_cols Columns identifying taxa. Defaults to
 #'   `c("taxid", "name", "level")`.
@@ -14,13 +30,15 @@
 #'   `"zero"` treats absence as zero; `"ignore"` calculates statistics using
 #'   only replicates in which the taxon appears.
 #'
-#' @return A tibble containing one row per taxon with measures of central
-#'   tendency, dispersion, and replicate consistency.
+#' @return A tibble with one row per taxon containing presence, variability,
+#'   and inferential relative variance statistics.
 #'
 #' @export
 inspect_stats <- function(
     data,
     value = "perc_comp_exact",
+    infrv_value = "incl_min_count",
+    pseudocount = 5,
     replicate = "db",
     taxon_cols = c("taxid", "name", "level"),
     missing = c("zero", "ignore")
@@ -28,7 +46,10 @@ inspect_stats <- function(
 
   missing <- match.arg(missing)
 
-  required_cols <- c(value, replicate, taxon_cols)
+  required_cols <- unique(
+    c(value, infrv_value, replicate, taxon_cols)
+  )
+
   missing_cols <- setdiff(required_cols, names(data))
 
   if (length(missing_cols) > 0) {
@@ -40,13 +61,36 @@ inspect_stats <- function(
   }
 
   if (!is.numeric(data[[value]])) {
-    stop("`value` must identify a numeric column.", call. = FALSE)
+    stop(
+      "`value` must identify a numeric column.",
+      call. = FALSE
+    )
+  }
+
+  if (!is.numeric(data[[infrv_value]])) {
+    stop(
+      "`infrv_value` must identify a numeric column.",
+      call. = FALSE
+    )
+  }
+
+  if (
+    length(pseudocount) != 1 ||
+    !is.numeric(pseudocount) ||
+    is.na(pseudocount) ||
+    pseudocount < 0
+  ) {
+    stop(
+      "`pseudocount` must be a single non-negative number.",
+      call. = FALSE
+    )
   }
 
   x <- data %>%
     dplyr::select(dplyr::all_of(required_cols)) %>%
     dplyr::rename(
       .value = dplyr::all_of(value),
+      .infrv_value = dplyr::all_of(infrv_value),
       .replicate = dplyr::all_of(replicate)
     ) %>%
     dplyr::mutate(.reported = TRUE)
@@ -58,20 +102,23 @@ inspect_stats <- function(
     )
   }
 
+  if (anyNA(x$.infrv_value)) {
+    stop(
+      "`", infrv_value, "` contains NA values.",
+      call. = FALSE
+    )
+  }
+
   n_replicates <- dplyr::n_distinct(x$.replicate)
 
-  # Check that each taxon occurs at most once per replicate.
+  # Check for duplicate taxon observations within replicates
   duplicates <- x %>%
-    dplyr::group_by(
+    dplyr::count(
       dplyr::across(
         dplyr::all_of(c(taxon_cols, ".replicate"))
       )
     ) %>%
-    dplyr::summarise(
-      .n = dplyr::n(),
-      .groups = "drop"
-    ) %>%
-    dplyr::filter(.n > 1)
+    dplyr::filter(n > 1)
 
   if (nrow(duplicates) > 0) {
     stop(
@@ -80,7 +127,7 @@ inspect_stats <- function(
     )
   }
 
-  # Add zeroes for taxa missing from individual replicates.
+  # Add absent taxon/replicate combinations as zero
   if (missing == "zero") {
 
     taxa <- x %>%
@@ -98,6 +145,7 @@ inspect_stats <- function(
       ) %>%
       dplyr::mutate(
         .value = tidyr::replace_na(.value, 0),
+        .infrv_value = tidyr::replace_na(.infrv_value, 0),
         .reported = tidyr::replace_na(.reported, FALSE)
       )
   }
@@ -108,88 +156,40 @@ inspect_stats <- function(
     ) %>%
     dplyr::summarise(
 
-      # Replicate consistency
+      # Replicate presence
       n_replicates = n_replicates,
       n_reported = sum(.reported),
       report_rate = n_reported / n_replicates,
 
-      n_nonzero = sum(.value > 0),
-      nonzero_rate = n_nonzero / n_replicates,
-
-      # Central tendency
+      # Descriptive statistics for `value`
       mean = mean(.value),
       median = stats::median(.value),
-
-      # Classical dispersion
       sd = stats::sd(.value),
-      variance = stats::var(.value),
+
+      cv = dplyr::if_else(
+        mean > 0,
+        100 * sd / mean,
+        NA_real_
+      ),
 
       min = min(.value),
       max = max(.value),
       range = max - min,
-
-      # Robust dispersion
-      q1 = as.numeric(
-        stats::quantile(.value, 0.25, names = FALSE)
-      ),
-
-      q3 = as.numeric(
-        stats::quantile(.value, 0.75, names = FALSE)
-      ),
-
       iqr = stats::IQR(.value),
 
-      # Unscaled median absolute deviation
-      mad = stats::mad(
-        .value,
-        constant = 1
-      ),
+      # Components of InfRV
+      infrv_mean = mean(.infrv_value),
+      infrv_variance = stats::var(.infrv_value),
+
+      # Zhu et al. (2019) InfRV
+      infrv = (
+        pmax(
+          infrv_variance - infrv_mean,
+          0
+        ) /
+          (infrv_mean + pseudocount)
+      ) + 0.01,
 
       .groups = "drop"
-    ) %>%
-    dplyr::mutate(
-
-      # Coefficient of variation
-      cv = dplyr::if_else(
-        mean != 0 & !is.na(sd),
-        sd / abs(mean),
-        NA_real_
-      ),
-
-      cv_percent = cv * 100,
-
-      # Robust CV based on MAD.
-      # 1.4826 scales MAD to approximate SD under normality.
-      robust_cv = dplyr::if_else(
-        median != 0,
-        (1.4826 * mad) / abs(median),
-        NA_real_
-      ),
-
-      robust_cv_percent = robust_cv * 100,
-
-      # Total observed spread relative to the mean
-      relative_range = dplyr::if_else(
-        mean != 0,
-        range / abs(mean),
-        NA_real_
-      ),
-
-      relative_range_percent = relative_range * 100,
-
-      # Robust relative dispersion
-      quartile_dispersion = dplyr::if_else(
-        (q1 + q3) != 0,
-        (q3 - q1) / (q3 + q1),
-        NA_real_
-      ),
-
-      # 1 = perfectly consistent min/max
-      # 0 = absent/zero in at least one replicate
-      min_max_ratio = dplyr::if_else(
-        max > 0,
-        min / max,
-        NA_real_
-      )
     )
 }
