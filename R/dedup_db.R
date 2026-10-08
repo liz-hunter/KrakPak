@@ -575,7 +575,7 @@ filter_db <- function(
 
     out$check_m_contamination <- value
 
-    keep <- value >= max_checkm_contamination
+    keep <- value <= max_checkm_contamination
     keep[is.na(keep)] <- keep_missing
 
     n_before <- nrow(out)
