@@ -1,15 +1,14 @@
-[README.md](https://github.com/user-attachments/files/33169445/README.md)
 # KrakPak
 
 **KrakPak** is an R package for building and evaluating bootstrap [Kraken2](https://github.com/DerrickWood/kraken2) databases.
 
-KrakPak provides tools to prepare NCBI genome assembly metadata, generate reproducible bootstrap samples for database construction, read Kraken2 `inspect` reports, and quantify variation in taxonomic representation across replicate databases.
+KrakPak provides tools to prepare NCBI genome assembly metadata, generate reproducible bootstrap samples for database construction, read Kraken2 `inspect` reports, quantify variation in taxonomic representation across replicate databases, select taxa for in silico evaluation, and build classification manifests for downstream workflows.
 
-> **Status:** KrakPak is under active development. The API and output formats may change as the package develops.
+> **Status:** KrakPak is a work in progress. 
 
 ## What KrakPak does
 
-KrakPak currently supports four parts of a bootstrap Kraken database workflow:
+KrakPak currently supports six parts of a bootstrap Kraken database workflow:
 
 1. **Prepare assembly metadata**
    - remove redundant paired GenBank/RefSeq assemblies with `dedup_db()`
@@ -28,6 +27,15 @@ KrakPak currently supports four parts of a bootstrap Kraken database workflow:
    - extract descendants of a taxon with `inspect_children()`
    - reshape replicate data with `inspect_wide()`
    - quantify variability in taxon representation with `inspect_stats()`
+
+5. **Select taxa for in silico evaluation**
+   - classify taxa into low, intermediate, high, or other variability classes with `classify_inspect_taxa()`
+   - select taxa by ranked or reproducible random sampling with `select_inspect_taxa()`
+   - run both steps together with `make_insilico_taxa()`
+
+6. **Build classification manifests**
+   - match selected accessions to paired in silico FASTQ files with `make_manifest()`
+   - expand each selected genome across replicate Kraken2 databases for downstream workflow execution
 
 ## Installation
 
@@ -204,6 +212,134 @@ inspect_matrix <- inspect_wide(
 )
 ```
 
+## Selecting taxa for in silico evaluation
+
+KrakPak can use the output of `inspect_stats()` to define reproducible variability classes and select taxa for downstream in silico testing.
+
+### Classify taxa by replicate variability
+
+`classify_inspect_taxa()` assigns taxa to low, intermediate, high, or other variability classes using intersections of `report_rate`, coefficient of variation (`cv`), and an optional minimum mean representation.
+
+The default criteria are:
+
+- **Low:** `report_rate >= 0.9` and `cv <= 40`
+- **Intermediate:** `report_rate` between `0.6` and `0.8` and `cv` between `50` and `100`
+- **High:** `report_rate <= 0.3` and `cv >= 160`
+- **Other:** taxa that do not satisfy one of the three designed classes
+
+```r
+classified <- classify_inspect_taxa(
+  inspect_summary,
+  tax_level = "S"
+)
+```
+
+All thresholds are user-configurable. For example:
+
+```r
+classified <- classify_inspect_taxa(
+  inspect_summary,
+  tax_level = "S",
+  low_report_min = 0.95,
+  low_cv_max = 30,
+  mid_report_min = 0.6,
+  mid_report_max = 0.8,
+  mid_cv_min = 50,
+  mid_cv_max = 100,
+  high_report_max = 0.2,
+  high_cv_min = 200,
+  min_mean = 0.01
+)
+```
+
+### Select taxa within variability classes
+
+`select_inspect_taxa()` selects a requested number of taxa from each class. Each class can be selected either by ranking or by reproducible random sampling.
+
+By default:
+
+- low variability taxa are selected by ranking, favoring better represented taxa
+- intermediate variability taxa are selected randomly
+- high variability taxa are selected by ranking, favoring better represented taxa within the unstable pool
+
+```r
+selected <- select_inspect_taxa(
+  classified,
+  n_per_group = 10,
+  seed = 20260917,
+  low_method = "ranked",
+  intermediate_method = "random",
+  high_method = "ranked"
+)
+```
+
+Different sample sizes can be requested for each group:
+
+```r
+selected <- select_inspect_taxa(
+  classified,
+  n_per_group = c(
+    low = 10,
+    intermediate = 20,
+    high = 10
+  ),
+  seed = 20260917
+)
+```
+
+### Run classification and selection together
+
+`make_insilico_taxa()` is a convenience wrapper that performs classification and selection in one step:
+
+```r
+selection <- make_insilico_taxa(
+  inspect_summary,
+  tax_level = "S",
+  n_per_group = 10,
+  seed = 20260917
+)
+```
+
+The returned list contains:
+
+- `classified`: all taxa at the requested taxonomic level with variability classes
+- `candidates`: taxa belonging to the low, intermediate, or high candidate pools
+- `selected`: taxa chosen for in silico evaluation
+- `summary`: candidate and selected counts by variability class
+
+```r
+selection$selected
+selection$summary
+```
+
+## Building a classification manifest
+
+After in silico reads have been generated, `make_manifest()` matches selected genome accessions to paired FASTQ files in a designated directory and expands each genome across replicate Kraken2 databases.
+
+FASTQ filenames must begin with an NCBI assembly accession and end in `_R1.fastq`, `_R2.fastq`, `_R1.fastq.gz`, or `_R2.fastq.gz`.
+
+For example:
+
+```text
+GCF_000001.1_simulated_R1.fastq.gz
+GCF_000001.1_simulated_R2.fastq.gz
+```
+
+Build a manifest directly from the taxa selected above:
+
+```r
+manifest <- make_manifest(
+  selection$selected,
+  reads_dir = "path/to/insilico_reads",
+  n_db_reps = 10,
+  out = "classification_manifest.tsv"
+)
+```
+
+The resulting table contains the selected taxon metadata, matched `R1` and `R2` paths, and a `db_rep` column identifying the replicate Kraken2 database to use for each classification task.
+
+This manifest is intended to provide a clean handoff from KrakPak's sample-selection logic to an external workflow manager such as Nextflow.
+
 ## Main functions
 
 | Function | Purpose |
@@ -217,15 +353,20 @@ inspect_matrix <- inspect_wide(
 | `inspect_children()` | Extract descendants of a specified taxid from inspect reports |
 | `inspect_wide()` | Reshape replicate inspect data to taxon-by-replicate wide format |
 | `inspect_stats()` | Calculate variability statistics across inspect replicates |
+| `classify_inspect_taxa()` | Classify taxa using report-rate and CV thresholds |
+| `select_inspect_taxa()` | Select taxa from variability classes by ranked or random sampling |
+| `make_insilico_taxa()` | Classify and select taxa for in silico evaluation in one step |
+| `make_manifest()` | Match selected accessions to paired reads and expand classification tasks across DB replicates |
 
 ## Development
 
-KrakPak is being developed as a research tool for evaluating how genome selection and database composition affect Kraken database behavior. Current development is focused on strengthening the R package interface, testing, documentation, and downstream comparison utilities.
+KrakPak is being developed as a research tool for evaluating how genome selection and database composition affect Kraken database behavior. Current development is focused on strengthening the R package interface, testing, documentation, reproducible sample selection, and downstream comparison utilities.
 
 To check a local development copy:
 
 ```r
 devtools::document()
+devtools::test()
 devtools::check()
 ```
 
