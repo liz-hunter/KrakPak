@@ -86,13 +86,13 @@ inspect_stats <- function(
     )
   }
 
-  x <- data %>%
-    dplyr::select(dplyr::all_of(required_cols)) %>%
+  x <- data |>
+    dplyr::select(dplyr::all_of(required_cols)) |>
     dplyr::rename(
       .value = dplyr::all_of(value),
       .infrv_value = dplyr::all_of(infrv_value),
       .replicate = dplyr::all_of(replicate)
-    ) %>%
+    ) |>
     dplyr::mutate(.reported = TRUE)
 
   if (anyNA(x$.value)) {
@@ -112,12 +112,12 @@ inspect_stats <- function(
   n_replicates <- dplyr::n_distinct(x$.replicate)
 
   # Check for duplicate taxon observations within replicates
-  duplicates <- x %>%
+  duplicates <- x |>
     dplyr::count(
       dplyr::across(
         dplyr::all_of(c(taxon_cols, ".replicate"))
       )
-    ) %>%
+    ) |>
     dplyr::filter(n > 1)
 
   if (nrow(duplicates) > 0) {
@@ -130,19 +130,19 @@ inspect_stats <- function(
   # Add absent taxon/replicate combinations as zero
   if (missing == "zero") {
 
-    taxa <- x %>%
+    taxa <- x |>
       dplyr::distinct(
         dplyr::across(dplyr::all_of(taxon_cols))
       )
 
-    replicates <- x %>%
+    replicates <- x |>
       dplyr::distinct(.replicate)
 
-    x <- tidyr::crossing(taxa, replicates) %>%
+    x <- tidyr::crossing(taxa, replicates) |>
       dplyr::left_join(
         x,
         by = c(taxon_cols, ".replicate")
-      ) %>%
+      ) |>
       dplyr::mutate(
         .value = tidyr::replace_na(.value, 0),
         .infrv_value = tidyr::replace_na(.infrv_value, 0),
@@ -150,10 +150,10 @@ inspect_stats <- function(
       )
   }
 
-  x %>%
+  x |>
     dplyr::group_by(
       dplyr::across(dplyr::all_of(taxon_cols))
-    ) %>%
+    ) |>
     dplyr::summarise(
 
       # Replicate presence

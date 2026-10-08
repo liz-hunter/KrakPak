@@ -4,4 +4,4 @@
 .httr-oauth
 .DS_Store
 .quarto
-inst/extdata/rickettsia_boot/
+inst/extdata/rickettsia_data/

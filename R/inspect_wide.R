@@ -48,12 +48,12 @@ inspect_wide <- function(
   }
 
   # Check for more than one value for a taxon within a replicate
-  duplicates <- data %>%
+  duplicates <- data |>
     dplyr::count(
       dplyr::across(
         dplyr::all_of(c(taxid, replicate))
       )
-    ) %>%
+    ) |>
     dplyr::filter(n > 1)
 
   if (nrow(duplicates) > 0) {
@@ -63,14 +63,14 @@ inspect_wide <- function(
     )
   }
 
-  data %>%
+  data |>
     dplyr::select(
       dplyr::all_of(c(taxid, name, replicate, value))
-    ) %>%
+    ) |>
     tidyr::pivot_wider(
       names_from = dplyr::all_of(replicate),
       values_from = dplyr::all_of(value),
       values_fill = fill
-    ) %>%
+    ) |>
     dplyr::arrange(.data[[taxid]])
 }

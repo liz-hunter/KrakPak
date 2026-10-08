@@ -1,6 +1,6 @@
 Package: KrakPak
 Title: Tools for Building and Evaluating Kraken Databases
-Version: 1.00
+Version: Version: 0.0.0.9000
 Authors@R:
     person(
         "Liz",
