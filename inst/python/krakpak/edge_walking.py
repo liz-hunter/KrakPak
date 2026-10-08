@@ -1,26 +1,47 @@
-#!/usr/bin/env python3
-
-import argparse
 from pathlib import Path
-import pandas as pd
 import re
-import sys
+
+import pandas as pd
 
 
-# ============================================================
+# -------------------------------------------------------------------------
 # Taxonomy loading
-# ============================================================
+# -------------------------------------------------------------------------
 
 def load_taxonomy(nodes_dmp):
     """
-    Load parent and rank information from NCBI nodes.dmp.
+    Load parent and rank information from an NCBI nodes.dmp file.
+
+    Parameters
+    ----------
+    nodes_dmp : str or pathlib.Path
+        Path to nodes.dmp.
+
+    Returns
+    -------
+    tuple
+        Two dictionaries:
+
+        parent
+            taxid -> parent taxid
+
+        rank
+            taxid -> taxonomic rank
     """
+
+    nodes_dmp = Path(nodes_dmp)
+
+    if not nodes_dmp.exists():
+        raise FileNotFoundError(
+            f"nodes.dmp not found: {nodes_dmp}"
+        )
 
     parent = {}
     rank = {}
 
-    with Path(nodes_dmp).open() as f:
-        for line in f:
+    with nodes_dmp.open() as fh:
+        for line in fh:
+
             parts = line.split("|")
 
             if len(parts) < 3:
@@ -38,18 +59,31 @@ def load_taxonomy(nodes_dmp):
 
 def load_merged(merged_dmp):
     """
-    Load old_taxid -> new_taxid mappings.
+    Load old-taxid to current-taxid mappings from merged.dmp.
+
+    If merged.dmp does not exist, an empty mapping is returned.
+
+    Parameters
+    ----------
+    merged_dmp : str or pathlib.Path
+        Path to merged.dmp.
+
+    Returns
+    -------
+    dict
+        old taxid -> current taxid
     """
+
+    merged_dmp = Path(merged_dmp)
 
     merged = {}
 
-    path = Path(merged_dmp)
-
-    if not path.exists():
+    if not merged_dmp.exists():
         return merged
 
-    with path.open() as f:
-        for line in f:
+    with merged_dmp.open() as fh:
+        for line in fh:
+
             parts = line.split("|")
 
             if len(parts) < 2:
@@ -63,18 +97,37 @@ def load_merged(merged_dmp):
     return merged
 
 
-# ============================================================
-# Taxid resolution
-# ============================================================
+# -------------------------------------------------------------------------
+# Taxid handling
+# -------------------------------------------------------------------------
 
-def resolve_taxid(taxid, parent_map, merged_map):
+def resolve_taxid(
+    taxid,
+    parent_map,
+    merged_map,
+):
+    """
+    Resolve a taxid against the current NCBI taxonomy.
+
+    Current taxids are returned unchanged. Obsolete taxids are followed
+    through merged.dmp until a current taxid is found.
+
+    Unclassified, missing, zero, or unresolvable taxids return None.
+    """
 
     if pd.isna(taxid):
         return None
 
     taxid = str(taxid).strip()
 
-    if taxid in ("", "0", "NA", "nan", "<NA>"):
+    if taxid in (
+        "",
+        "0",
+        "NA",
+        "nan",
+        "<NA>",
+        "unclassified",
+    ):
         return None
 
     if taxid in parent_map:
@@ -82,9 +135,13 @@ def resolve_taxid(taxid, parent_map, merged_map):
 
     seen = set()
 
-    while taxid in merged_map and taxid not in seen:
+    while (
+        taxid in merged_map
+        and taxid not in seen
+    ):
 
         seen.add(taxid)
+
         taxid = merged_map[taxid]
 
         if taxid in parent_map:
@@ -93,102 +150,124 @@ def resolve_taxid(taxid, parent_map, merged_map):
     return None
 
 
-# ============================================================
-# Project a taxid upward to requested rank
-# ============================================================
-
 def project_to_rank(
     taxid,
     target_rank,
     parent_map,
     rank_map,
     merged_map,
-    cache,
+    cache=None,
 ):
     """
-    Walk upward until target_rank is reached.
+    Project a taxid upward to a requested taxonomic rank.
 
-    If the taxid is already at target_rank, return it.
+    If the resolved taxid is already at the target rank, it is returned.
 
-    If no ancestor at target_rank exists, return the resolved
-    original taxid. This is important for calls ABOVE the target
-    rank. Example:
+    If the taxid is below the target rank, its ancestor at the target rank
+    is returned.
 
-        target = species
-        prediction = genus
+    If no ancestor at the target rank exists, the resolved original taxid
+    is retained. This preserves meaningful distances for classifications
+    made above the target rank.
 
-    The genus stays a genus, so its distance from the true species
-    remains meaningful.
+    For example, when evaluating at species rank, a prediction made at
+    genus rank remains a genus rather than becoming missing.
     """
 
-    cache_key = (taxid, target_rank)
+    if cache is None:
+        cache = {}
+
+    cache_key = (
+        str(taxid),
+        target_rank,
+    )
 
     if cache_key in cache:
         return cache[cache_key]
 
     resolved = resolve_taxid(
-        taxid,
-        parent_map,
-        merged_map,
+        taxid=taxid,
+        parent_map=parent_map,
+        merged_map=merged_map,
     )
 
     if resolved is None:
         cache[cache_key] = None
         return None
 
-    cur = resolved
+    current = resolved
     seen = set()
 
-    while cur in parent_map and cur not in seen:
+    while (
+        current in parent_map
+        and current not in seen
+    ):
 
-        seen.add(cur)
+        seen.add(current)
 
-        if rank_map.get(cur) == target_rank:
-            cache[cache_key] = cur
-            return cur
+        if rank_map.get(current) == target_rank:
+            cache[cache_key] = current
+            return current
 
-        par = parent_map[cur]
+        parent = parent_map[current]
 
-        if par == cur:
+        if parent == current:
             break
 
-        cur = par
+        current = parent
 
     # No ancestor at requested rank.
-    # Keep original resolved taxid.
+    # Keep the resolved original taxid.
     cache[cache_key] = resolved
 
     return resolved
 
 
-# ============================================================
-# Lineage + edge distance
-# ============================================================
+# -------------------------------------------------------------------------
+# Lineage and edge distance
+# -------------------------------------------------------------------------
 
-def lineage(taxid, parent_map, cache):
+def lineage(
+    taxid,
+    parent_map,
+    cache=None,
+):
+    """
+    Return lineage from taxid upward toward the taxonomy root.
+
+    The starting taxid is included as the first element.
+    """
+
+    if cache is None:
+        cache = {}
 
     if taxid in cache:
         return cache[taxid]
 
-    lin = []
-    cur = taxid
+    result = []
+
+    current = taxid
     seen = set()
 
-    while cur in parent_map and cur not in seen:
+    while (
+        current in parent_map
+        and current not in seen
+    ):
 
-        seen.add(cur)
-        lin.append(cur)
+        seen.add(current)
 
-        par = parent_map[cur]
+        result.append(current)
 
-        if par == cur:
+        parent = parent_map[current]
+
+        if parent == current:
             break
 
-        cur = par
+        current = parent
 
-    cache[taxid] = lin
+    cache[taxid] = result
 
-    return lin
+    return result
 
 
 def edge_distance(
@@ -198,316 +277,493 @@ def edge_distance(
     parent_map,
     rank_map,
     merged_map,
-    rank_cache,
-    lineage_cache,
+    rank_cache=None,
+    lineage_cache=None,
 ):
+    """
+    Calculate taxonomy-tree edge distance between true and predicted taxids.
 
-    # --------------------------------------------------------
-    # First normalize BOTH true and predicted taxids to the
-    # requested analysis rank where possible.
-    # --------------------------------------------------------
+    Both taxids are projected to the requested analysis rank where possible.
+
+    Parameters
+    ----------
+    true_taxid : str
+        True taxonomic ID.
+
+    pred_taxid : str
+        Predicted taxonomic ID.
+
+    target_rank : str
+        Taxonomic rank at which the comparison should be evaluated.
+
+    parent_map : dict
+        taxid -> parent taxid
+
+    rank_map : dict
+        taxid -> rank
+
+    merged_map : dict
+        old taxid -> current taxid
+
+    rank_cache : dict, optional
+        Cache for rank projection.
+
+    lineage_cache : dict, optional
+        Cache for lineage calculations.
+
+    Returns
+    -------
+    tuple
+        distance, normalized true taxid, normalized predicted taxid
+
+        distance is None when either taxid cannot be resolved or when the
+        two lineages have no common node in the supplied taxonomy.
+    """
+
+    if rank_cache is None:
+        rank_cache = {}
+
+    if lineage_cache is None:
+        lineage_cache = {}
 
     true_norm = project_to_rank(
-        true_taxid,
-        target_rank,
-        parent_map,
-        rank_map,
-        merged_map,
-        rank_cache,
+        taxid=true_taxid,
+        target_rank=target_rank,
+        parent_map=parent_map,
+        rank_map=rank_map,
+        merged_map=merged_map,
+        cache=rank_cache,
     )
 
     pred_norm = project_to_rank(
-        pred_taxid,
-        target_rank,
-        parent_map,
-        rank_map,
-        merged_map,
-        rank_cache,
+        taxid=pred_taxid,
+        target_rank=target_rank,
+        parent_map=parent_map,
+        rank_map=rank_map,
+        merged_map=merged_map,
+        cache=rank_cache,
     )
 
-    if true_norm is None or pred_norm is None:
-        return None, true_norm, pred_norm
+    if (
+        true_norm is None
+        or pred_norm is None
+    ):
+        return (
+            None,
+            true_norm,
+            pred_norm,
+        )
 
-    # Child classifications now collapse to same rank/node.
+    # Same taxon after projection to target rank.
     if true_norm == pred_norm:
-        return 0, true_norm, pred_norm
+        return (
+            0,
+            true_norm,
+            pred_norm,
+        )
 
-    true_lin = lineage(
-        true_norm,
-        parent_map,
-        lineage_cache,
+    true_lineage = lineage(
+        taxid=true_norm,
+        parent_map=parent_map,
+        cache=lineage_cache,
     )
 
-    pred_lin = lineage(
-        pred_norm,
-        parent_map,
-        lineage_cache,
+    pred_lineage = lineage(
+        taxid=pred_norm,
+        parent_map=parent_map,
+        cache=lineage_cache,
     )
 
     pred_positions = {
-        taxid: i
-        for i, taxid in enumerate(pred_lin)
+        taxid: index
+        for index, taxid in enumerate(
+            pred_lineage
+        )
     }
 
-    for i, ancestor in enumerate(true_lin):
+    for true_index, ancestor in enumerate(
+        true_lineage
+    ):
 
-        j = pred_positions.get(ancestor)
+        pred_index = pred_positions.get(
+            ancestor
+        )
 
-        if j is not None:
-            return i + j, true_norm, pred_norm
+        if pred_index is not None:
 
-    return None, true_norm, pred_norm
+            distance = (
+                true_index
+                + pred_index
+            )
 
+            return (
+                distance,
+                true_norm,
+                pred_norm,
+            )
 
-# ============================================================
-# Main
-# ============================================================
-
-def main():
-
-    ap = argparse.ArgumentParser()
-
-    ap.add_argument(
-        "--input-tsv",
-        required=True,
-        help="Wide per-read Kraken summary TSV",
+    return (
+        None,
+        true_norm,
+        pred_norm,
     )
 
-    ap.add_argument(
-        "--key",
-        required=True,
-        help="extremes_key_simple.tsv",
-    )
 
-    ap.add_argument(
-        "--myfiles",
-        required=True,
-        help="Value of $MYFILES",
-    )
+# -------------------------------------------------------------------------
+# Classification-table helpers
+# -------------------------------------------------------------------------
 
-    ap.add_argument(
-        "--rank",
-        default="species",
-        help="Rank at which classifications are evaluated "
-             "(default: species)",
-    )
+def _read_classification(
+    classification,
+):
+    """
+    Read or copy a KrakPak per-read classification table.
+    """
 
-    ap.add_argument(
-        "--output-dir",
-        required=True,
-    )
+    if isinstance(
+        classification,
+        pd.DataFrame,
+    ):
+        return classification.copy()
 
-    args = ap.parse_args()
+    path = Path(classification)
 
-    input_file = Path(args.input_tsv)
-    output_dir = Path(args.output_dir)
-    myfiles = Path(args.myfiles)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Classification file not found: {path}"
+        )
 
-    output_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    per_read_dir = output_dir / "per_read"
-    summary_dir = output_dir / "summary_parts"
-
-    per_read_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    summary_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # ========================================================
-    # Read key
-    # ========================================================
-
-    key = pd.read_csv(
-        args.key,
+    return pd.read_csv(
+        path,
         sep="\t",
-        dtype={
-            "dataset": "string",
-            "taxid": "string",
-            "accession": "string",
-        },
+        dtype="string",
     )
 
-    # ========================================================
-    # Determine accession from filename
-    #
-    # Files created by your current summarizer are:
-    # ACCESSION_dataset_classification.tsv
-    # ========================================================
 
-    matching = key[
-        key["accession"].apply(
-            lambda x: input_file.name.startswith(str(x))
-        )
-    ]
+def _find_db_columns(
+    df,
+    dataset=None,
+):
+    """
+    Identify columns named <dataset>_dbN.
 
-    if len(matching) != 1:
-        sys.exit(
-            f"ERROR: expected exactly one accession from the key "
-            f"to match {input_file.name}; found {len(matching)}"
-        )
+    Returns
+    -------
+    tuple
+        inferred/validated dataset name,
+        list of (database number, column name)
+    """
 
-    key_row = matching.iloc[0]
+    if dataset is None:
 
-    accession = str(key_row["accession"])
-    dataset = str(key_row["dataset"])
-    true_taxid = str(key_row["taxid"])
-
-    print("=" * 70)
-    print(f"Input:       {input_file.name}")
-    print(f"Accession:   {accession}")
-    print(f"Dataset:     {dataset}")
-    print(f"True taxid:  {true_taxid}")
-    print(f"Target rank: {args.rank}")
-    print("=" * 70)
-
-    # ========================================================
-    # Select full taxonomy
-    # ========================================================
-
-    taxonomy_dirs = {
-        "entero":
-            myfiles
-            / "entropy_entero"
-            / "entero_full"
-            / "taxonomy",
-
-        "stan":
-            myfiles
-            / "entropy_stan"
-            / "stan_full"
-            / "taxonomy",
-
-        "virid":
-            myfiles
-            / "entropy_virid"
-            / "virid_full"
-            / "taxonomy",
-    }
-
-    if dataset not in taxonomy_dirs:
-        sys.exit(
-            f"ERROR: unknown dataset '{dataset}'"
+        pattern = re.compile(
+            r"^(.+)_db(\d+)$"
         )
 
-    taxonomy_dir = taxonomy_dirs[dataset]
+        matches = []
 
-    nodes_dmp = taxonomy_dir / "nodes.dmp"
-    merged_dmp = taxonomy_dir / "merged.dmp"
+        for column in df.columns:
+
+            match = pattern.match(
+                column
+            )
+
+            if match:
+                matches.append(
+                    (
+                        match.group(1),
+                        int(match.group(2)),
+                        column,
+                    )
+                )
+
+        if not matches:
+            raise ValueError(
+                "No classification columns matching "
+                "'<dataset>_dbN' were found."
+            )
+
+        datasets = {
+            item[0]
+            for item in matches
+        }
+
+        if len(datasets) != 1:
+            raise ValueError(
+                "More than one dataset prefix was found in "
+                "classification columns: "
+                + ", ".join(
+                    sorted(datasets)
+                )
+            )
+
+        dataset = next(
+            iter(datasets)
+        )
+
+        db_columns = [
+            (
+                db_number,
+                column,
+            )
+            for prefix, db_number, column
+            in matches
+            if prefix == dataset
+        ]
+
+    else:
+
+        dataset = str(
+            dataset
+        )
+
+        pattern = re.compile(
+            rf"^{re.escape(dataset)}_db(\d+)$"
+        )
+
+        db_columns = []
+
+        for column in df.columns:
+
+            match = pattern.match(
+                column
+            )
+
+            if match:
+                db_columns.append(
+                    (
+                        int(
+                            match.group(1)
+                        ),
+                        column,
+                    )
+                )
+
+    db_columns.sort(
+        key=lambda x: x[0]
+    )
+
+    if not db_columns:
+        raise ValueError(
+            f"No {dataset}_dbN columns found."
+        )
+
+    return (
+        dataset,
+        db_columns,
+    )
+
+
+# -------------------------------------------------------------------------
+# Main reusable function
+# -------------------------------------------------------------------------
+
+def edge_walk_classification(
+    classification,
+    taxonomy_dir,
+    target_rank="species",
+    dataset=None,
+    output_dir=None,
+):
+    """
+    Calculate taxonomic edge distances for a KrakPak classification table.
+
+    Parameters
+    ----------
+    classification : str, pathlib.Path, or pandas.DataFrame
+        Per-read classification table produced by KrakPak's
+        summarize_classification().
+
+        Expected columns include:
+
+            read_id
+            true_taxid
+            <dataset>_db1
+            <dataset>_db2
+            ...
+
+        Unclassified reads should contain the literal value
+        "unclassified".
+
+    taxonomy_dir : str or pathlib.Path
+        Directory containing NCBI nodes.dmp and optionally merged.dmp.
+
+    target_rank : str, default "species"
+        Taxonomic rank at which classifications should be evaluated.
+
+    dataset : str, optional
+        Dataset prefix used in classification columns.
+
+        If None, the prefix is inferred from columns named
+        <dataset>_dbN.
+
+    output_dir : str or pathlib.Path, optional
+        If supplied, write per-read and summary TSV files here.
+
+    Returns
+    -------
+    dict
+        {
+            "per_read": pandas.DataFrame,
+            "summary": pandas.DataFrame,
+            "dataset": str,
+            "target_rank": str,
+            "normalized_true_taxid": str,
+            "per_read_file": pathlib.Path or None,
+            "summary_file": pathlib.Path or None,
+        }
+    """
+
+    taxonomy_dir = Path(
+        taxonomy_dir
+    )
+
+    nodes_dmp = (
+        taxonomy_dir
+        / "nodes.dmp"
+    )
+
+    merged_dmp = (
+        taxonomy_dir
+        / "merged.dmp"
+    )
 
     if not nodes_dmp.exists():
-        sys.exit(
-            f"ERROR: nodes.dmp not found: {nodes_dmp}"
+        raise FileNotFoundError(
+            f"nodes.dmp not found: {nodes_dmp}"
         )
 
-    # ========================================================
+    # ------------------------------------------------------------------
     # Load taxonomy
-    # ========================================================
+    # ------------------------------------------------------------------
 
-    print(f"Loading taxonomy: {nodes_dmp}")
-
-    parent_map, rank_map = load_taxonomy(
-        nodes_dmp
+    parent_map, rank_map = (
+        load_taxonomy(
+            nodes_dmp
+        )
     )
 
     merged_map = load_merged(
         merged_dmp
     )
 
-    print(
-        f"Loaded {len(parent_map):,} nodes "
-        f"and {len(merged_map):,} merged taxids"
-    )
-
     rank_cache = {}
     lineage_cache = {}
 
-    # ========================================================
-    # Normalize TRUE taxid once
-    # ========================================================
+    # ------------------------------------------------------------------
+    # Read classification table
+    # ------------------------------------------------------------------
+
+    df = _read_classification(
+        classification
+    )
+
+    required = {
+        "read_id",
+        "true_taxid",
+    }
+
+    missing = (
+        required
+        - set(df.columns)
+    )
+
+    if missing:
+        raise ValueError(
+            "Classification table is missing required "
+            "column(s): "
+            + ", ".join(
+                sorted(missing)
+            )
+        )
+
+    # Require one true taxid per input table.
+    true_taxids = (
+        df["true_taxid"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    if len(true_taxids) != 1:
+        raise ValueError(
+            "Classification table must contain exactly "
+            "one unique true_taxid."
+        )
+
+    true_taxid = str(
+        true_taxids[0]
+    )
+
+    # ------------------------------------------------------------------
+    # Identify database columns
+    # ------------------------------------------------------------------
+
+    dataset, db_columns = (
+        _find_db_columns(
+            df=df,
+            dataset=dataset,
+        )
+    )
+
+    # ------------------------------------------------------------------
+    # Normalize true taxid once
+    # ------------------------------------------------------------------
 
     normalized_true = project_to_rank(
-        true_taxid,
-        args.rank,
-        parent_map,
-        rank_map,
-        merged_map,
-        rank_cache,
+        taxid=true_taxid,
+        target_rank=target_rank,
+        parent_map=parent_map,
+        rank_map=rank_map,
+        merged_map=merged_map,
+        cache=rank_cache,
     )
 
     if normalized_true is None:
-        sys.exit(
-            f"ERROR: true taxid {true_taxid} cannot be resolved"
-        )
-
-    print(
-        f"True taxid at {args.rank}: "
-        f"{true_taxid} -> {normalized_true}"
-    )
-
-    # ========================================================
-    # Read wide Kraken summary
-    # ========================================================
-
-    df = pd.read_csv(
-        input_file,
-        sep="\t",
-        dtype="string",
-    )
-
-    # ========================================================
-    # Find db columns
-    # ========================================================
-
-    pattern = re.compile(
-        rf"^{re.escape(dataset)}_db(\d+)$"
-    )
-
-    db_columns = []
-
-    for col in df.columns:
-
-        m = pattern.match(col)
-
-        if m:
-            db_columns.append(
-                (int(m.group(1)), col)
-            )
-
-    db_columns.sort()
-
-    if not db_columns:
-        sys.exit(
-            f"ERROR: no {dataset}_dbN columns found"
+        raise ValueError(
+            f"True taxid {true_taxid} could not be "
+            "resolved in the supplied taxonomy."
         )
 
     summary_rows = []
 
-    # ========================================================
-    # Process each Kraken database
-    # ========================================================
+    # ------------------------------------------------------------------
+    # Process database replicates
+    # ------------------------------------------------------------------
 
     for db_number, pred_col in db_columns:
-
-        print(f"\nProcessing {pred_col}")
 
         edge_col = (
             f"{pred_col}_edge_distance"
         )
 
-        # ----------------------------------------------------
-        # Compute only once per unique predicted taxid
-        # ----------------------------------------------------
+        predictions = (
+            df[pred_col]
+            .astype("string")
+        )
+
+        # Explicit Kraken outcome.
+        unclassified = (
+            predictions
+            == "unclassified"
+        )
+
+        # Missing means the read is absent from this replicate's
+        # classification table, which is different from explicitly
+        # unclassified.
+        missing_prediction = (
+            predictions.isna()
+        )
+
+        # --------------------------------------------------------------
+        # Compute each unique predicted taxid only once
+        # --------------------------------------------------------------
 
         unique_predictions = (
-            df[pred_col]
+            predictions[
+                ~unclassified
+                & ~missing_prediction
+            ]
             .dropna()
             .unique()
         )
@@ -517,12 +773,18 @@ def main():
 
         for pred_taxid in unique_predictions:
 
-            pred_taxid = str(pred_taxid)
+            pred_taxid = str(
+                pred_taxid
+            )
 
-            dist, _, pred_norm = edge_distance(
+            (
+                distance,
+                _,
+                pred_norm,
+            ) = edge_distance(
                 true_taxid=true_taxid,
                 pred_taxid=pred_taxid,
-                target_rank=args.rank,
+                target_rank=target_rank,
                 parent_map=parent_map,
                 rank_map=rank_map,
                 merged_map=merged_map,
@@ -530,119 +792,225 @@ def main():
                 lineage_cache=lineage_cache,
             )
 
-            distance_lookup[pred_taxid] = dist
-            normalized_lookup[pred_taxid] = pred_norm
+            distance_lookup[
+                pred_taxid
+            ] = distance
 
-        # ----------------------------------------------------
-        # Map distances back to reads
-        # ----------------------------------------------------
+            normalized_lookup[
+                pred_taxid
+            ] = pred_norm
 
-        df[edge_col] = (
-            df[pred_col]
-            .map(distance_lookup)
-            .astype("Int64")
+        # --------------------------------------------------------------
+        # Map back to reads
+        # --------------------------------------------------------------
+
+        edge_values = predictions.map(
+            distance_lookup
         )
 
-        # ----------------------------------------------------
+        df[edge_col] = pd.array(
+            edge_values,
+            dtype="Int64",
+        )
+
+        # --------------------------------------------------------------
         # Summary
-        # ----------------------------------------------------
+        # --------------------------------------------------------------
 
         n_reads = len(df)
-
-        unclassified = (
-            df[pred_col].isna()
-            | (df[pred_col] == "0")
-        )
 
         n_unclassified = int(
             unclassified.sum()
         )
 
-        n_valid = int(
-            df[edge_col].notna().sum()
+        n_missing_prediction = int(
+            missing_prediction.sum()
+        )
+
+        n_valid_distance = int(
+            df[edge_col]
+            .notna()
+            .sum()
         )
 
         n_correct = int(
-            (df[edge_col] == 0).sum()
+            (
+                df[edge_col]
+                == 0
+            )
+            .fillna(False)
+            .sum()
         )
 
-        n_no_distance = (
-            n_reads
-            - n_unclassified
-            - n_valid
+        n_incorrect_distance = int(
+            (
+                df[edge_col]
+                > 0
+            )
+            .fillna(False)
+            .sum()
         )
 
-        mean_distance = (
-            float(df[edge_col].mean())
-            if n_valid > 0
+        # Classified taxids that could not be resolved in the
+        # supplied taxonomy.
+        classified_taxid = (
+            ~unclassified
+            & ~missing_prediction
+        )
+
+        no_distance = (
+            classified_taxid
+            & df[edge_col].isna()
+        )
+
+        n_no_distance = int(
+            no_distance.sum()
+        )
+
+        mean_edge_distance = (
+            float(
+                df[edge_col].mean()
+            )
+            if n_valid_distance > 0
             else float("nan")
         )
 
-        pct_correct = (
-            100.0 * n_correct / n_reads
+        pct_correct_all = (
+            100.0
+            * n_correct
+            / n_reads
             if n_reads > 0
             else float("nan")
         )
 
-        print(f"  reads:            {n_reads:,}")
-        print(f"  valid distances:  {n_valid:,}")
-        print(f"  correct @ rank:   {n_correct:,}")
-        print(f"  unclassified:     {n_unclassified:,}")
-        print(f"  no distance:      {n_no_distance:,}")
-        print(f"  mean edges:       {mean_distance:.6f}")
-        print(f"  percent correct:  {pct_correct:.4f}")
+        pct_correct_valid = (
+            100.0
+            * n_correct
+            / n_valid_distance
+            if n_valid_distance > 0
+            else float("nan")
+        )
 
         summary_rows.append(
             {
-                "taxid": true_taxid,
-                "rank_taxid": normalized_true,
-                "rank": args.rank,
-                "db": db_number,
-                "n_reads": n_reads,
-                "n_valid": n_valid,
-                "n_correct": n_correct,
-                "n_unclassified": n_unclassified,
-                "n_no_distance": n_no_distance,
-                "pct_correct": pct_correct,
-                "mean_edge_distance": mean_distance,
+                "true_taxid":
+                    true_taxid,
+
+                "rank_taxid":
+                    normalized_true,
+
+                "rank":
+                    target_rank,
+
+                "dataset":
+                    dataset,
+
+                "db":
+                    db_number,
+
+                "n_reads":
+                    n_reads,
+
+                "n_valid_distance":
+                    n_valid_distance,
+
+                "n_correct":
+                    n_correct,
+
+                "n_incorrect_distance":
+                    n_incorrect_distance,
+
+                "n_unclassified":
+                    n_unclassified,
+
+                "n_no_distance":
+                    n_no_distance,
+
+                "n_missing_prediction":
+                    n_missing_prediction,
+
+                "pct_correct_all":
+                    pct_correct_all,
+
+                "pct_correct_valid":
+                    pct_correct_valid,
+
+                "mean_edge_distance":
+                    mean_edge_distance,
             }
         )
 
-    # ========================================================
-    # Write outputs
-    # ========================================================
-
-    stem = input_file.stem
-
-    per_read_file = (
-        per_read_dir
-        / f"{stem}_{args.rank}_edges.tsv"
-    )
-
-    summary_file = (
-        summary_dir
-        / f"{accession}_{dataset}_{args.rank}_summary.tsv"
-    )
-
-    df.to_csv(
-        per_read_file,
-        sep="\t",
-        index=False,
-    )
-
-    pd.DataFrame(
+    summary = pd.DataFrame(
         summary_rows
-    ).to_csv(
-        summary_file,
-        sep="\t",
-        index=False,
     )
 
-    print("\n" + "=" * 70)
-    print(f"Wrote: {per_read_file}")
-    print(f"Wrote: {summary_file}")
-    print("=" * 70)
+    # ------------------------------------------------------------------
+    # Optional output
+    # ------------------------------------------------------------------
 
+    per_read_file = None
+    summary_file = None
 
-if __name__ == "__main__":
-    main()
+    if output_dir is not None:
+
+        output_dir = Path(
+            output_dir
+        )
+
+        output_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        per_read_file = (
+            output_dir
+            / (
+                f"{dataset}_"
+                f"{true_taxid}_"
+                f"{target_rank}_edges.tsv"
+            )
+        )
+
+        summary_file = (
+            output_dir
+            / (
+                f"{dataset}_"
+                f"{true_taxid}_"
+                f"{target_rank}_edge_summary.tsv"
+            )
+        )
+
+        df.to_csv(
+            per_read_file,
+            sep="\t",
+            index=False,
+        )
+
+        summary.to_csv(
+            summary_file,
+            sep="\t",
+            index=False,
+        )
+
+    return {
+        "per_read":
+            df,
+
+        "summary":
+            summary,
+
+        "dataset":
+            dataset,
+
+        "target_rank":
+            target_rank,
+
+        "normalized_true_taxid":
+            normalized_true,
+
+        "per_read_file":
+            per_read_file,
+
+        "summary_file":
+            summary_file,
+    }
